@@ -1,0 +1,133 @@
+name: Build & Release StageCommander
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Analyze & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libasound2-dev libpulse-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: 'stable'
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  build-windows:
+    name: Build Windows (.exe)
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: 'stable'
+          cache: true
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Package Windows portable bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "dist/StageCommander-windows-x64.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StageCommander-windows-x64
+          path: dist/StageCommander-windows-x64.zip
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS (.app / .dmg)
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: 'stable'
+          cache: true
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - name: Package macOS .dmg and .zip
+        run: |
+          app="build/macos/Build/Products/Release/StageCommander.app"
+          lipo -archs "$app/Contents/MacOS/StageCommander"
+          stage=$(mktemp -d)
+          mkdir -p dist
+          ditto "$app" "$stage/StageCommander.app"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -volname StageCommander -srcfolder "$stage" -format UDZO dist/StageCommander-macos.dmg
+          hdiutil verify dist/StageCommander-macos.dmg
+          ditto -c -k --sequesterRsrc --keepParent "$app" dist/StageCommander-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StageCommander-macos
+          path: |
+            dist/StageCommander-macos.dmg
+            dist/StageCommander-macos.zip
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux (tar.gz & .deb)
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libasound2-dev libpulse-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: 'stable'
+          cache: true
+      - name: Build and package Linux releases
+        run: bash scripts/build_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StageCommander-linux-x64
+          path: |
+            dist/StageCommander-linux-x64.tar.gz
+            dist/StageCommander-linux-x64.deb
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "StageCommander ${{ github.ref_name }}"
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/**/*
